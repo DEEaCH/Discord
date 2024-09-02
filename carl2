@@ -1,0 +1,144 @@
+import datetime
+import traceback
+import logging
+import sys
+import copy
+import json
+import sqlite3
+import aiohttp
+import discord
+from discord.ext import commands
+
+# List of extensions (modules) to load
+INITIAL_EXTENSIONS = [
+    'cogs.blizzard',
+    'cogs.ckc',
+    'cogs.highlight',
+    'cogs.meta',
+    'cogs.mod',
+    'cogs.ping',
+    'cogs.poll',
+    'cogs.roles',
+    'cogs.stats',
+    'cogs.stattrak',
+    'cogs.tags'
+]
+
+def load_json(filename):
+    """Loads a JSON file."""
+    with open(filename, encoding='utf-8') as infile:
+        return json.load(infile)
+
+def write_json(filename, contents):
+    """Updates a JSON file."""
+    with open(filename, 'w') as outfile:
+        json.dump(contents, outfile, ensure_ascii=True, indent=4)
+
+# Database connection
+conn = sqlite3.connect('database.db')
+c = conn.cursor()
+
+# Logger setup
+log = logging.getLogger(__name__)
+
+def _prefix_callable(bot, msg):
+    user_id = bot.user.id
+    base = ['<@!{}> '.format(user_id), '<@{}> '.format(user_id)]
+    if msg.guild is None:
+        base.append('!')
+        base.append('?')
+    else:
+        base.extend(bot.prefixes.get(msg.guild.id, ['?', '!']))
+    return base
+
+def load_credentials():
+    """Loads the bot token and application ID from the cred.json file."""
+    with open('cred.json') as f:
+        return json.load(f)
+
+credentials = load_credentials()
+
+class CarlBot(commands.Bot):
+    def __init__(self):
+        super().__init__(command_prefix=_prefix_callable,
+                         description="Better than the last one",
+                         help_attrs=dict(hidden=True))
+        
+        # Bot and owner IDs
+        self.client_id = 1264274684661334156 # REPLACE WITH YOUR APPLICATION ID
+        self.owner_id = 106429844627169280  # Replace with your Discord user ID if needed
+        
+        # Load server-specific prefixes
+        c.execute('SELECT * FROM servers WHERE 1')
+        server_rows = c.fetchall()
+        pre = {k[0]: k[5] or '!,?' for k in server_rows}
+        self.prefixes = {int(k): v.split(',') for (k, v) in pre.items()}
+        
+        # Session for HTTP requests
+        self.session = aiohttp.ClientSession(loop=self.loop)
+        
+        # Load bot token
+        self.token = credentials["a828f91a257f0a9090cb32c65f0191a263bf396387ae1e0a971773698c66b6dd"]  # REPLACE WITH YOUR BOT TOKEN
+        
+        # Load specified extensions (cogs)
+        for extension in INITIAL_EXTENSIONS:
+            try:
+                self.load_extension(extension)
+            except Exception as e:
+                print('Failed to load extension {}\n{}: {}'.format(extension, type(e).__name__, e))
+
+    async def on_command_error(self, ctx, error):
+        if isinstance(error, commands.NoPrivateMessage):
+            await ctx.author.send('This command cannot be used in private messages.')
+        elif isinstance(error, commands.DisabledCommand):
+            await ctx.author.send('Sorry. This command is disabled and cannot be used.')
+        elif isinstance(error, commands.CommandInvokeError):
+            print(f'In {ctx.command.qualified_name}:', file=sys.stderr)
+            traceback.print_tb(error.original.__traceback__)
+            print(f'{error.original.__class__.__name__}: {error.original}', file=sys.stderr)
+
+    async def on_ready(self):
+        """Handles bot readiness and sets up initial data."""
+        print('Logged in as:')
+        print('Username: ' + self.user.name)
+        print('ID: ' + str(self.user.id))
+        print('------')
+        if not hasattr(self, 'uptime'):
+            self.uptime = datetime.datetime.utcnow()
+        for server in self.guilds:
+            c.execute('''INSERT OR IGNORE INTO servers VALUES (?, ?, ?, ?, ?, ?)''',
+                      (str(server.id), None, None, None, None, '?,!'))
+            conn.commit()
+            c.execute('''INSERT OR IGNORE INTO logging VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                      (str(server.id), 1, 1, 1, 1, 1, 1, 1, None))
+            conn.commit()
+            c.execute('''INSERT OR IGNORE INTO config VALUES (?, ?, ?, ?, ?, ?)''',
+                      (server.id, None, None, True, None, None))
+            conn.commit()
+            c.execute('''INSERT OR IGNORE INTO role_config VALUES (?, ?, ?, ?, ?)''',
+                      (None, False, str(server.id), None, True))
+            conn.commit()
+
+    async def on_message(self, message):
+        if message.author.bot:
+            return
+        await self.process_commands(message)
+        ctx = await self.get_context(message)
+        if ctx.invoked_with and ctx.invoked_with.lower() not in self.commands and ctx.command is None:
+            msg = copy.copy(message)
+            if ctx.prefix:
+                new_content = msg.content[len(ctx.prefix):]
+                msg.content = "{}tag get {}".format(ctx.prefix, new_content)
+                await self.process_commands(msg)
+
+    async def close(self):
+        await super().close()
+        await self.session.close()
+
+    def run(self):
+        """Runs the bot using the loaded token."""
+        super().run(self.token, reconnect=True)
+
+if __name__ == '__main__':
+    carlbot = CarlBot()
+    carlbot.run()
